@@ -1,15 +1,16 @@
 #!/bin/bash
 
-# Google 服务 IP 扫描器
-# 自动扫描最佳 Google 服务 IP 并生成 hosts 文件
-# GitHub: https://github.com/yourusername/google-service-ip-scanner
+# Google 服务 IP 扫描器 - GitHub Actions 优化版
 
 # 检测是否在 GitHub Actions 中运行
 if [ -n "$GITHUB_ACTIONS" ]; then
     echo "运行在 GitHub Actions 环境中"
     DAEMON_MODE=false
+    # 在 CI 环境中增加详细日志
+    VERBOSE=true
 else
     DAEMON_MODE=true
+    VERBOSE=false
 fi
 
 # 加载配置文件
@@ -42,31 +43,37 @@ check_dependencies() {
     
     if [ ${#missing[@]} -gt 0 ]; then
         echo "缺少必要依赖: ${missing[*]}"
-        echo "请选择安装方式:"
-        echo "1. 自动安装 (Debian/Ubuntu)"
-        echo "2. 手动安装"
-        read -rp "请输入选择 [1-2]: " choice
-        
-        case $choice in
-            1)
-                echo "正在安装依赖..."
-                sudo apt update
-                sudo apt install -y jq fping curl gawk coreutils
-                ;;
-            *)
-                echo "请手动安装以下依赖:"
-                for dep in "${missing[@]}"; do
-                    case $dep in
-                        jq) echo " - jq: 强大的JSON处理工具" ;;
-                        fping) echo " - fping: 高效的IP扫描工具" ;;
-                        curl) echo " - curl: 数据传输工具" ;;
-                        awk) echo " - awk: 文本处理工具" ;;
-                    esac
-                done
-                echo "安装完成后重新运行脚本"
-                exit 1
-                ;;
-        esac
+        if [ -n "$GITHUB_ACTIONS" ]; then
+            echo "在 GitHub Actions 中安装依赖..."
+            sudo apt update
+            sudo apt install -y jq fping curl gawk coreutils
+        else
+            echo "请选择安装方式:"
+            echo "1. 自动安装 (Debian/Ubuntu)"
+            echo "2. 手动安装"
+            read -rp "请输入选择 [1-2]: " choice
+            
+            case $choice in
+                1)
+                    echo "正在安装依赖..."
+                    sudo apt update
+                    sudo apt install -y jq fping curl gawk coreutils
+                    ;;
+                *)
+                    echo "请手动安装以下依赖:"
+                    for dep in "${missing[@]}"; do
+                        case $dep in
+                            jq) echo " - jq: 强大的JSON处理工具" ;;
+                            fping) echo " - fping: 高效的IP扫描工具" ;;
+                            curl) echo " - curl: 数据传输工具" ;;
+                            awk) echo " - awk: 文本处理工具" ;;
+                        esac
+                    done
+                    echo "安装完成后重新运行脚本"
+                    exit 1
+                    ;;
+            esac
+        fi
     fi
 }
 
@@ -74,16 +81,18 @@ check_dependencies() {
 download_ip_list() {
     local url=$1
     local output=$2
+    echo "下载IP列表: $url"
     if ! curl -sSL -f "$url" -o "$output"; then
         echo "警告: 无法下载 $url"
         return 1
     fi
+    echo "下载完成, 文件大小: $(wc -l < "$output") 行"
 }
 
 # 生成随机子网IP
 generate_random_ips() {
     local cidr=$1
-    local count=50
+    local count=100
     local network prefix
     
     IFS='/' read -r network prefix <<< "$cidr"
@@ -96,6 +105,16 @@ generate_random_ips() {
         
         local range_start=$(( (last_octet) & ~((1 << (32 - prefix)) - 1) ))
         local range_end=$(( range_start + (1 << (32 - prefix)) - 1 ))
+        
+        # 确保范围有效
+        if [ "$range_start" -gt 255 ] || [ "$range_end" -lt 0 ]; then
+            echo "无效的CIDR范围: $cidr" >&2
+            return
+        fi
+        
+        # 限制范围在0-255之间
+        range_start=$(( range_start < 0 ? 0 : range_start ))
+        range_end=$(( range_end > 255 ? 255 : range_end ))
         
         for _ in $(seq 1 "$count"); do
             local rand_octet=$(( RANDOM % (range_end - range_start + 1) + range_start ))
@@ -110,14 +129,29 @@ scan_ips() {
     local results_file
     results_file=$(mktemp)
     local batch_size=$SCAN_CONCURRENCY
+    local total_ips=${#ips[@]}
+    local scanned=0
     
-    for ((i = 0; i < ${#ips[@]}; i += batch_size)); do
+    echo "开始扫描 $total_ips 个IP地址..."
+    
+    for ((i = 0; i < total_ips; i += batch_size)); do
+        # 计算当前批次
         local batch=("${ips[@]:i:batch_size}")
+        local batch_size_actual=${#batch[@]}
+        scanned=$((scanned + batch_size_actual))
+        
+        # 显示进度
+        printf "扫描进度: %d/%d (%.1f%%) \r" "$scanned" "$total_ips" "$(echo "scale=2; $scanned*100/$total_ips" | bc)"
+        
+        # 使用fping扫描
         fping -c1 -t"${SCAN_TIMEOUT}000" -q "${batch[@]}" 2>&1 | \
         awk -F'[:/]' '/alive/ {print $1, $(NF-1)}' | \
         awk '{print $1, $NF}' >> "$results_file"
     done
     
+    echo "" # 换行
+    
+    # 排序并限制结果数量
     sort -k2 -n "$results_file" | head -n "$IP_SCAN_LIMIT"
     rm -f "$results_file"
 }
@@ -133,7 +167,11 @@ generate_hosts_file() {
     {
         echo "# Google 服务最佳IP"
         echo "# 生成时间: $timestamp"
-        echo "# 使用IP: $ip (延迟: ${latency}ms)"
+        if [ -n "$latency" ]; then
+            echo "# 使用IP: $ip (延迟: ${latency}ms)"
+        else
+            echo "# 使用IP: $ip (延迟: 未知)"
+        fi
         echo "# GitHub项目: https://github.com/yourusername/google-service-ip-scanner"
         echo ""
         
@@ -171,18 +209,27 @@ perform_scan() {
     download_ip_list "$REMOTE_IPV6_FILE" "/tmp/ipv6.txt"
     
     # 添加远程IP
-    [ -f "/tmp/ipv4.txt" ] && mapfile -t ipv4_list < <(grep -E '^[0-9]' "/tmp/ipv4.txt")
-    [ -f "/tmp/ipv6.txt" ] && mapfile -t ipv6_list < <(grep -E '^[0-9a-fA-F:]' "/tmp/ipv6.txt")
+    if [ -f "/tmp/ipv4.txt" ]; then
+        mapfile -t ipv4_list < <(grep -E '^[0-9]' "/tmp/ipv4.txt")
+        echo "从远程文件加载 IPv4 数量: ${#ipv4_list[@]}"
+    fi
     
-    echo "生成随机IP..."
+    if [ -f "/tmp/ipv6.txt" ]; then
+        mapfile -t ipv6_list < <(grep -E '^[0-9a-fA-F:]' "/tmp/ipv6.txt")
+        echo "从远程文件加载 IPv6 数量: ${#ipv6_list[@]}"
+    fi
+    
     # 添加IP段中的随机IP
+    echo "生成随机IP..."
     for range in "${IP_RANGES[@]}"; do
+        echo "生成范围: $range"
         while IFS= read -r ip; do
             ipv4_list+=("$ip")
         done < <(generate_random_ips "$range")
     done
     
     for range in "${IPV6_RANGES[@]}"; do
+        echo "生成范围: $range"
         while IFS= read -r ip; do
             ipv6_list+=("$ip")
         done < <(generate_random_ips "$range")
@@ -200,16 +247,39 @@ perform_scan() {
     echo " - 最大结果: ${IP_SCAN_LIMIT}"
     echo "----------------------------------------"
     
+    if [ ${#all_ips[@]} -eq 0 ]; then
+        echo "错误: 没有可用的IP地址进行扫描"
+        return 1
+    fi
+    
     # 扫描IP
     local results=()
+    local scanned_results
+    scanned_results=$(scan_ips "${all_ips[@]}")
+    
     while IFS= read -r line; do
         if [ -n "$line" ]; then
             results+=("$line")
         fi
-    done < <(scan_ips "${all_ips[@]}")
+    done <<< "$scanned_results"
     
     if [ ${#results[@]} -eq 0 ]; then
         echo "未找到可用IP"
+        
+        # 在 GitHub Actions 中，使用备用方案
+        if [ -n "$GITHUB_ACTIONS" ]; then
+            echo "在 GitHub Actions 中使用备用方案"
+            # 从配置中选择第一个IP段中的第一个IP作为备用
+            local fallback_ip
+            fallback_ip=$(generate_random_ips "${IP_RANGES[0]}" | head -n1)
+            
+            if [ -n "$fallback_ip" ]; then
+                echo "使用备用IP: $fallback_ip"
+                generate_hosts_file "$fallback_ip" ""
+                return 0
+            fi
+        fi
+        
         return 1
     fi
     
