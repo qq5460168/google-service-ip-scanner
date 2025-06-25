@@ -1,0 +1,41 @@
+name: 定时扫描 Google 服务 IP
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # 每4小时运行一次 (UTC时间)
+  workflow_dispatch:        # 允许手动触发
+
+jobs:
+  scan-and-update:
+    runs-on: ubuntu-latest
+    name: 扫描并更新 hosts 文件
+    
+    steps:
+    - name: 检出仓库
+      uses: actions/checkout@v4
+      with:
+        ref: 'main'
+    
+    - name: 安装依赖
+      run: |
+        sudo apt update
+        sudo apt install -y jq fping
+        
+    - name: 运行扫描脚本
+      run: |
+        chmod +x scan-google-ip.sh
+        ./scan-google-ip.sh
+        
+    - name: 提交生成的 hosts 文件
+      run: |
+        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "GitHub Actions"
+        
+        # 检查是否有文件变化
+        if git diff --quiet; then
+          echo "没有变化，跳过提交"
+        else
+          git add google-hosts.txt
+          git commit -m "🚀 自动更新: Google 服务 hosts 文件 [$(date +'%Y-%m-%d %H:%M')]"
+          git push
+        fi
