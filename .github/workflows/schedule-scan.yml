@@ -19,7 +19,7 @@ jobs:
     - name: 安装依赖
       run: |
         sudo apt update
-        sudo apt install -y jq fping
+        sudo apt install -y jq fping bc
         
     - name: 运行扫描脚本
       run: |
