@@ -1,6 +1,6 @@
 # Google 服务最佳IP
-# 生成时间: 2025-06-27 02:03:10
-# 使用IP: 开始扫描 (延迟: 581ms)
+# 生成时间: 2025-06-27 04:34:08
+# 使用IP: 开始扫描 (延迟: 583ms)
 # GitHub项目: https://github.com/yourusername/google-service-ip-scanner
 
 # Google 翻译服务
